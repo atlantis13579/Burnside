@@ -1,0 +1,9 @@
+/Binaries/*
+/Intermediate/*
+/Build/*
+!Binaries/.gitkeep
+!Intermediate/.gitkeep
+!Build/.gitkeep
+/.vs/
+*.user
+*.suo
