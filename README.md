@@ -50,46 +50,16 @@ a 3.2-second confetti celebration and congratulations banner. It starts after
 the final animation finishes, fades automatically and is dismissed by a new
 move. Startup, cube-order changes and Reset do not trigger a reward.
 
-## Rendering and interface
-
-All orders render solid rounded cubies and rounded colored stickers. The camera
-uses perspective with equal horizontal/vertical pixel scale, centered in the
-space between the panels. Resizing preserves the cube's proportions. Geometry,
-UV interpolation and depth-tested picking use the same perspective transform.
-
-The DX11 renderer includes key/fill lighting, specular highlights, a soft
-backdrop/contact shadow and 4× MSAA where supported, with 2× / 1× fallbacks.
-Opaque panels and text are drawn after scene resolve into a complete frame,
-then presented through a double-buffered flip swap chain. UI actions are applied
-after rendering so the model and history use one consistent snapshot.
-
 ## Independent solver
 
 `BurnsideCore.lib` exposes `Core/Cube.h`, `Core/Solver.h` and `Core/Timeline.h`.
-It needs only the standard C++ runtime, with no GUI, DX11, Windows or Python
-headers.
+It needs only the standard C++ runtime
 
-Two solution methods are available:
+Solution methods are available:
 
-1. **Verified construction certificate.** Replay the path from solved and compare
-   all stickers against the input. If it matches, invert and reduce the path,
-   combining commuting parallel slices, then verify the solution again. This
-   handles application-generated states for every order 2–10.
-2. **State-only bidirectional BFS.** Search the sticker state without a history.
+1. **State-only bidirectional BFS.** Search the sticker state without a history.
    Returns a shortest quarter-turn path within the configured bounds; a half turn
    has quarter-turn cost two. Library defaults are depth 8, 150,000 states,
    approximately 128 MiB and 3 seconds. Exhaustion is reported explicitly and is
    never described as solved or unreachable.
 
-The default recovery method depends on a verified history. State-only search is
-suitable for short scrambles; an efficient arbitrary-state solver for deeply
-scrambled large-order cubes is not implemented. Time, memory, node and depth
-limits and atomic cancellation are supported. Solving does not mutate the input;
-the GUI runs it on a background worker.
-
-## Attribution
-
-The immediate-mode GUI derives from Mikko Mononen's IMGUI with Riemann extensions.
-The DX11 backend is adapted from Riemann. See source notices and
-`Src/ThirdParty/Riemann-LICENSE.txt`. Burnside is independent of S18 and does not
-require the Riemann checkout.
