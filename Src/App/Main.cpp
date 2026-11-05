@@ -21,6 +21,7 @@ using namespace Burnside;
 namespace
 {
 constexpr int LeftWidth = 290, RightWidth = 340;
+constexpr int DefaultScrambleMoves(int order) { return (20*order+1)/3; }
 struct Application
 {
     HWND Window = nullptr;
@@ -37,13 +38,17 @@ struct Application
     bool Pressed = false, Dragged = false, Right = false, Ctrl = false, Minimized = false;
     int DownX = 0, DownY = 0, LastX = 0, LastY = 0;
     int LeftScroll = 0, RightScroll = 0, HistoryHeaderScroll = 0;
-    float Duration = 0.22f, RandomCount = 25;
-    bool Solving = false, StateSearch = false;
+    float Duration = 0.22f;
+    int RandomCount = 20;
+    bool Solving = false;
+    SolveMethod SelectedMethod = SolveMethod::History;
     std::atomic_bool Cancel{false};
+    std::atomic<int> SolverStage{0};
     std::future<SolveResult> Future;
+    std::chrono::steady_clock::time_point SolverStarted{};
     std::string Status = "Ready. Click a sticker to turn a slice.";
     std::string SolverMethod;
-    bool HasSolution = false, DemoRewind = false;
+    bool HasSolution = false, DemoRewind = false, SolutionAutoPlaying = false;
     size_t SolutionStart = 0, SolutionEnd = 0;
     std::vector<std::function<void()>> Deferred;
     bool FollowHistory = true;
@@ -58,7 +63,7 @@ struct Application
     int StableFrames=0, WarmupFrames=0;
     uint64_t StableHash=0;
     size_t RandomSyncFrames=0;
-    bool ResizedSmoke=false, RandomFrameSaved=false;
+    bool ResizedSmoke=false, RandomFrameSaved=false, PlaybackHeaderSeen=false;
     Move SmokeHorizontal{}, SmokeVertical{};
     std::wstring Capture;
 
@@ -68,32 +73,41 @@ struct Application
     void ChangeOrder(int order)
     {
         Trail = Timeline(order); View = ViewSettings{}; Completion=CompletionEffect{};
-        RightScroll = 0; HasSolution = DemoRewind = false; LastClickMove.reset();
+        RandomCount=DefaultScrambleMoves(order);
+        if ((order>3 && SelectedMethod==SolveMethod::TwoPhase) ||
+            (order<=3 && SelectedMethod==SolveMethod::Reduction) ||
+            ((order<4 || order%2) &&
+             (SelectedMethod==SolveMethod::Yau || SelectedMethod==SolveMethod::Hoya)))
+            SelectedMethod=SolveMethod::History;
+        RightScroll = 0; HasSolution = DemoRewind = SolutionAutoPlaying = false; LastClickMove.reset();
         PreviousHistory=0; FollowHistory=true;
         Status = "Ready. Click a row cross; hold Ctrl for a column.";
     }
     void Append(const std::vector<Move>& moves, MoveSource source)
     {
         if (Locked()) return;
-        Trail.Append(moves,source); HasSolution = false; DemoRewind = false;
+        Trail.Append(moves,source); HasSolution = DemoRewind = SolutionAutoPlaying = false;
         LastClickMove.reset(); FollowHistory=true;
     }
     void Randomize()
     {
-        Append(Scramble(Trail.State().Order(),static_cast<int>(RandomCount),TimeSeed()),MoveSource::Scramble);
-        Status = "Randomizing. History records each move as it starts.";
+        Append(Scramble(Trail.State().Order(),RandomCount,TimeSeed()),MoveSource::Scramble);
+        Status = "Randomizing " + std::to_string(RandomCount) + " moves. History records each move as it starts.";
     }
     void StartSolve()
     {
         if (Locked()) return;
-        Solving = true; Cancel = false; Status = "Solving in background...";
+        CancelGesture();
+        SolutionAutoPlaying=false;
+        Solving = true; Cancel = false; SolverStage = 0;
+        SolverStarted=std::chrono::steady_clock::now(); Status = "Solving in background...";
         LastClickMove.reset();
-        const Cube state = Trail.State(); const auto proof = Trail.Certificate(); const bool search = StateSearch;
-        Future = std::async(std::launch::async,[this,state,proof,search]()
+        const Cube state = Trail.State(); const auto proof = Trail.Certificate(); const auto method = SelectedMethod;
+        Future = std::async(std::launch::async,[this,state,proof,method]()
         {
-            SolveOptions options; options.Cancel = &Cancel;
-            options.TimeLimit = std::chrono::seconds(search ? 5 : 60);
-            return Solve(state,options,search ? nullptr : &proof);
+            SolveOptions options; options.Cancel = &Cancel; options.ProgressStage = &SolverStage;
+            options.TimeLimit = std::chrono::seconds(method==SolveMethod::BreadthFirst ? 5 : 60);
+            return Solve(state,method,options,method==SolveMethod::History ? &proof : nullptr);
         });
     }
     void PollSolver()
@@ -108,7 +122,8 @@ struct Application
             {
                 SolutionStart = Trail.Cursor();
                 Trail.Append(result.Moves,MoveSource::Solver,false);
-                SolutionEnd = Trail.Entries().size(); HasSolution = true;
+                SolutionEnd = Trail.Entries().size(); HasSolution = true; SolutionAutoPlaying=false;
+                RightScroll=0; PreviousHistory=0; FollowHistory=true;
                 Status = "Solution ready: " + std::to_string(result.Moves.size()) + " moves. Press Demo.";
             }
         }
@@ -117,15 +132,19 @@ struct Application
     void Demo()
     {
         if (Solving || !HasSolution) return;
-        Trail.Seek(SolutionStart); DemoRewind = true;
+        Trail.Seek(SolutionStart); DemoRewind = true; SolutionAutoPlaying=false;
         FollowHistory=true; LastClickMove.reset();
         Status = "Demo: animate to solution start, then play the solution.";
     }
     void Tick(float dt)
     {
         PollSolver();
-        Trail.Tick(std::min(dt,Duration*0.5f),Duration);
-        if (DemoRewind && !Trail.Busy()) { DemoRewind = false; Trail.Seek(SolutionEnd); }
+        Trail.Tick(std::min(dt,Duration*0.5f),Duration,3.0f);
+        if (DemoRewind && !Trail.Busy())
+        {
+            DemoRewind = false; Trail.Seek(SolutionEnd); SolutionAutoPlaying=true;
+        }
+        else if (SolutionAutoPlaying && !Trail.Busy()) SolutionAutoPlaying=false;
         Completion.Tick(Trail.State().IsSolved(),Trail.Busy(),dt);
     }
     void Click(int x, int y, bool right, bool control)
@@ -143,14 +162,16 @@ struct Application
         const auto action=Trail.ApplyManual(move);
         if (action==ManualAction::Ignored) return;
         LastClickMove=move; LastClickX=x; LastClickY=y; LastClickControl=control; LastClickRight=right;
-        HasSolution=false; FollowHistory=true;
+        HasSolution=false; SolutionAutoPlaying=false; FollowHistory=true;
         Status=(action==ManualAction::Undo ? "Undo: " : action==ManualAction::Redo ? "Redo: " : "Manual: ")+move.ToString(Trail.State().Order());
     }
     void Reset()
     {
-        DemoRewind=false; HasSolution=false; LastClickMove.reset(); FollowHistory=true;
+        DemoRewind=false; HasSolution=false; SolutionAutoPlaying=false; LastClickMove.reset(); FollowHistory=true;
         Completion.Reset(true);
-        Trail.ResetAnimated(); Status="Rewinding to the solved origin.";
+        Trail.ResetImmediate();
+        SolutionStart=SolutionEnd=0; RightScroll=HistoryHeaderScroll=0; PreviousHistory=0;
+        Status="Reset to the solved origin.";
     }
     void Defer(std::function<void()> action) { Deferred.push_back(std::move(action)); }
     void ExecuteDeferred()
@@ -197,6 +218,25 @@ struct Application
         }
         if (!line.empty()) imguiLabel(line.c_str());
     }
+    std::string ProgressText() const
+    {
+        const int stage=SolverStage.load(std::memory_order_relaxed);
+        const char* phase="Searching";
+        int total=0;
+        if (SelectedMethod==SolveMethod::Reduction)
+        {
+            static constexpr const char* names[]={"Preparing cube","Solving centers","Pairing edges","Solving 3x3","Finishing edges","Optimizing moves","Verifying solution"};
+            phase=names[std::clamp(stage,0,6)]; total=6;
+        }
+        else if (SelectedMethod==SolveMethod::Yau || SelectedMethod==SolveMethod::Hoya)
+        {
+            static constexpr const char* names[]={"Preparing cube","First centers","Building cross","Remaining centers","Restoring cross","Pairing edges","Solving 3x3","Verifying solution"};
+            phase=names[std::clamp(stage,0,7)]; total=7;
+        }
+        const auto elapsed=std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now()-SolverStarted).count();
+        return "Progress: " + std::string(phase) + (total ? " (stage " + std::to_string(stage) + "/" + std::to_string(total) + ")" : "") +
+            ", " + std::to_string(elapsed) + " s elapsed";
+    }
     void GUI()
     {
         const int width=Graphics.Width(),height=Graphics.Height(),order=Trail.State().Order();
@@ -210,21 +250,37 @@ struct Application
         imguiBeginFrame(guiX,height-guiY,GuiButtons,Wheel); Wheel=0;
         DrawFeedback(Scene,Completion,width,height,!Solving && !Pressed);
         imguiBeginScrollArea("BURNSIDE / CUBE",10,10,LeftWidth-20,height-20,&LeftScroll);
-        const char* sizes[]={"2 x 2 x 2","3 x 3 x 3","4 x 4 x 4","5 x 5 x 5","6 x 6 x 6","7 x 7 x 7","8 x 8 x 8","9 x 9 x 9","10 x 10 x 10"};
+        const char* sizes[]={"2 x 2 x 2","3 x 3 x 3","4 x 4 x 4","5 x 5 x 5",
+            "6 x 6 x 6","7 x 7 x 7","8 x 8 x 8","9 x 9 x 9","10 x 10 x 10",
+            "11 x 11 x 11","12 x 12 x 12","13 x 13 x 13","14 x 14 x 14",
+            "15 x 15 x 15","16 x 16 x 16"};
         int selection=order-2;
-        if (imguiCombo("Cube size",&selection,sizes,9,!Locked())) Defer([this,selection] { ChangeOrder(selection+2); });
+        if (imguiCombo("Cube size",&selection,sizes,MaxOrder-1,!Locked())) Defer([this,selection] { ChangeOrder(selection+2); });
+        const char* methods[]={"History inverse","Bidirectional BFS",
+            order<=3 ? "Two-phase (2x2 / 3x3)" : "NxN reduction",
+            "Yau-style staging","Hoya-style staging"};
+        int methodSelection=SelectedMethod==SolveMethod::Yau ? 3 :
+            SelectedMethod==SolveMethod::Hoya ? 4 :
+            SelectedMethod==SolveMethod::TwoPhase || SelectedMethod==SolveMethod::Reduction ? 2 :
+            static_cast<int>(SelectedMethod);
+        const int methodCount=order>=4 && order%2==0 ? 5 : 3;
+        if (imguiCombo("Solve method",&methodSelection,methods,methodCount,!Locked()))
+            Defer([this,methodSelection,order] {
+                SelectedMethod=methodSelection==2 ? (order<=3 ? SolveMethod::TwoPhase : SolveMethod::Reduction) :
+                    methodSelection==3 ? SolveMethod::Yau :
+                    methodSelection==4 ? SolveMethod::Hoya :
+                    static_cast<SolveMethod>(methodSelection);
+            });
         imguiLabel((std::to_string(Trail.State().Colors().size())+" stickers / 6 faces").c_str());
         imguiLabel(Trail.State().IsSolved() ? "SOLVED" : "SCRAMBLED");
         imguiSeparatorLine();
         if (imguiButton("Solve / prepare sequence",!Locked())) Defer([this] { StartSolve(); });
+        if (Solving) Wrapped(ProgressText());
         if (imguiButton("Cancel solver",Solving)) Defer([this] { Cancel=true; });
         if (imguiButton("Demo solution",HasSolution && !Solving)) Defer([this] { Demo(); });
-        if (imguiButton("Reset (animated)",!Solving)) Defer([this] { Reset(); });
+        if (imguiButton("Reset",!Solving)) Defer([this] { Reset(); });
         if (imguiButton("Random scramble",!Locked())) Defer([this] { Randomize(); });
-        imguiSlider("Random moves",&RandomCount,1,100,1,!Locked());
-        imguiSlider("Seconds / turn",&Duration,0.04f,1.0f,0.02f);
         imguiSeparatorLine();
-        if (imguiCheck("State-only search (5s limit)",StateSearch,!Locked())) Defer([this] { StateSearch=!StateSearch; });
         if (imguiButton("Export state + timeline",!Locked())) Defer([this] { Export(); });
         if (imguiButton("Load move sequence...",!Locked())) Defer([this] { Import(); });
         imguiSeparatorLine();
@@ -239,36 +295,50 @@ struct Application
         Wrapped(Status);
         imguiEndScrollArea();
 
-        const size_t history=Trail.HistoryCount();
+        const size_t history=HasSolution ? SolutionEnd-SolutionStart : Trail.HistoryCount();
+        const size_t cursor=HasSolution ? std::clamp(Trail.Cursor(),SolutionStart,SolutionEnd)-SolutionStart : Trail.Cursor();
+        const size_t playbackStep=HasSolution && Trail.HistoryCount()>=SolutionStart ?
+            std::min(history,Trail.HistoryCount()-SolutionStart) : 0;
         DrawnHistoryRows=history;
-        if (history!=PreviousHistory && FollowHistory)
-            RightScroll=std::max(0,static_cast<int>((history+1)*24)-(height-229));
-        PreviousHistory=history;
-        imguiBeginScrollArea("HISTORY",width-RightWidth+10,height-175,RightWidth-20,165,&HistoryHeaderScroll);
-        imguiLabel((std::to_string(Trail.Cursor())+" completed"+(Trail.ActiveMove() ? " / turning..." : "")).c_str());
+        const size_t follow=HasSolution ? cursor : history;
+        if (follow!=PreviousHistory && FollowHistory)
+            RightScroll=std::max(0,static_cast<int>((follow+1)*24)-(height-229));
+        PreviousHistory=follow;
+        imguiBeginScrollArea(HasSolution ? "SOLUTION" : "HISTORY",width-RightWidth+10,height-175,RightWidth-20,165,&HistoryHeaderScroll);
+        if (SolutionAutoPlaying && !DemoRewind && Trail.Busy())
+            imguiLabel((std::to_string(playbackStep)+" / "+std::to_string(history)).c_str());
         if (imguiButton(Trail.Busy() ? "Pause at boundary" : "Play / redo to end",!Solving))
             Defer([this] { DemoRewind=false; LastClickMove.reset(); FollowHistory=true;
-                if (Trail.Busy()) Trail.StopAtNextBoundary(); else Trail.Seek(Trail.Entries().size()); });
-        if (imguiButton("Step back",!Solving && !Trail.Busy() && Trail.Cursor()>0))
-            Defer([this] { DemoRewind=false; LastClickMove.reset(); Trail.Seek(Trail.Cursor()-1); });
-        if (imguiButton("Step forward",!Solving && !Trail.Busy() && Trail.Cursor()<Trail.Entries().size()))
-            Defer([this] { DemoRewind=false; LastClickMove.reset(); Trail.Seek(Trail.Cursor()+1); });
-        imguiLabel("Click a recorded move to seek");
+                if (Trail.Busy()) { Trail.StopAtNextBoundary(); SolutionAutoPlaying=false; }
+                else
+                {
+                    const size_t end=HasSolution ? SolutionEnd : Trail.Entries().size();
+                    SolutionAutoPlaying=HasSolution && Trail.Cursor()<end;
+                    Trail.Seek(end);
+                }
+            });
+        if (imguiButton("Step back",!Solving && !Trail.Busy() && cursor>0))
+            Defer([this] { DemoRewind=SolutionAutoPlaying=false; LastClickMove.reset(); Trail.Seek(Trail.Cursor()-1); });
+        if (imguiButton("Step forward",!Solving && !Trail.Busy() && cursor<history))
+            Defer([this] { DemoRewind=SolutionAutoPlaying=false; LastClickMove.reset(); Trail.Seek(Trail.Cursor()+1); });
+        imguiLabel(HasSolution ? "Click a solution move to seek" : "Click a recorded move to seek");
         imguiEndScrollArea();
 
-        imguiBeginScrollArea("RECORDED MOVES",width-RightWidth+10,10,RightWidth-20,height-195,&RightScroll);
-        if (imguiItem(Trail.Cursor()==0 ? "> 0  Solved origin" : "  0  Solved origin",!Solving))
-            Defer([this] { DemoRewind=false; LastClickMove.reset(); Trail.Seek(0); });
+        imguiBeginScrollArea(HasSolution ? "SOLUTION MOVES" : "RECORDED MOVES",width-RightWidth+10,10,RightWidth-20,height-195,&RightScroll);
+        const std::string origin=HasSolution ? (cursor==0 ? "> 0  Solution start" : "  0  Solution start") :
+            (cursor==0 ? "> 0  Solved origin" : "  0  Solved origin");
+        if (imguiItem(origin.c_str(),!Solving))
+            Defer([this] { DemoRewind=SolutionAutoPlaying=false; LastClickMove.reset(); Trail.Seek(HasSolution ? SolutionStart : 0); });
         const size_t begin=std::min(history,static_cast<size_t>(std::max(0,RightScroll/24-2)));
         const size_t end=std::min(history,begin+static_cast<size_t>(height/24+8));
         imguiSkipItems(static_cast<int>(begin));
         for (size_t i=begin; i<end; ++i)
         {
-            const Entry& entry=Trail.Entries()[i];
+            const Entry& entry=Trail.Entries()[HasSolution ? SolutionStart+i : i];
             const char source=entry.Source==MoveSource::Manual ? 'M' : entry.Source==MoveSource::Scramble ? 'R' : 'S';
-            const bool selected=Trail.ActiveMove() ? i+1==history : i+1==Trail.Cursor();
+            const bool selected=Trail.ActiveMove() ? i+1==cursor+1 : i+1==cursor;
             const std::string label=(selected ? "> " : "  ")+std::to_string(i+1)+" "+source+"  "+entry.Rotation.ToString(order);
-            if (imguiItem(label.c_str(),!Solving)) Defer([this,i] { DemoRewind=false; LastClickMove.reset(); Trail.Seek(i+1); });
+            if (imguiItem(label.c_str(),!Solving)) Defer([this,i] { DemoRewind=SolutionAutoPlaying=false; LastClickMove.reset(); Trail.Seek((HasSolution ? SolutionStart : 0)+i+1); });
         }
         imguiSkipItems(static_cast<int>(history-end));
         imguiEndScrollArea();
@@ -276,7 +346,7 @@ struct Application
         const std::string title=std::to_string(order)+" x "+std::to_string(order)+" x "+std::to_string(order)+" RUBIK CUBE";
         imguiDrawText(LeftWidth+24,height-38,IMGUI_ALIGN_LEFT,title.c_str(),textColor);
         imguiDrawText(LeftWidth+24,height-62,IMGUI_ALIGN_LEFT,"Click: row  /  Ctrl: column  /  Drag: orbit",textColor);
-        imguiDrawText(LeftWidth+24,45,IMGUI_ALIGN_LEFT,(std::to_string(Scene.RenderedCubies)+" cubies / "+std::to_string(Scene.VisibleStickers)+" stickers").c_str(),textColor);
+        imguiDrawText(LeftWidth+24,45,IMGUI_ALIGN_LEFT,(std::to_string(order*order*order)+" cubies / "+std::to_string(Scene.VisibleStickers)+" stickers").c_str(),textColor);
         if (Scene.HoverMove)
         {
             const bool control=Smoke ? SmokeControl : (GetKeyState(VK_CONTROL)&0x8000)!=0;
@@ -293,6 +363,14 @@ struct Application
         const WPARAM modifier=control ? MK_CONTROL : 0;
         SendMessageW(Window,right ? WM_RBUTTONDOWN : WM_LBUTTONDOWN,modifier|(right ? MK_RBUTTON : MK_LBUTTON),MAKELPARAM(SmokeClickX,SmokeClickY));
         SendMessageW(Window,right ? WM_RBUTTONUP : WM_LBUTTONUP,modifier,MAKELPARAM(SmokeClickX,SmokeClickY));
+    }
+    bool VisibleText(const std::string& value) const
+    {
+        const auto* commands=imguiGetRenderQueue();
+        for (int i=0; i<imguiGetRenderQueueSize(); ++i)
+            if (commands[i].type==IMGUI_GFXCMD_TEXT && commands[i].text.text &&
+                value==commands[i].text.text) return true;
+        return false;
     }
     void PointAtRandomButton()
     {
@@ -327,13 +405,16 @@ struct Application
         ++SmokeFrames;
         if (SmokeFrames>10000) throw std::runtime_error("GUI smoke timeout");
         const size_t n=Trail.State().Order();
-        if (Scene.RenderedCubies!=n*n*n || Scene.VisibleStickers!=6*n*n) throw std::runtime_error("Wrong NxNxN model geometry");
-        if (DrawnHistoryRows!=Trail.HistoryCount()) throw std::runtime_error("GUI/model history mismatch");
+        if (Scene.RenderedCubies!=n*n*n-(n-2)*(n-2)*(n-2) || Scene.VisibleStickers!=6*n*n)
+            throw std::runtime_error("Wrong NxNxN surface geometry");
+        if (DrawnHistoryRows!=(HasSolution ? SolutionEnd-SolutionStart : Trail.HistoryCount())) throw std::runtime_error("GUI/model history mismatch");
         if (Trail.Busy() && !Scene.TurnHints.empty()) throw std::runtime_error("Turn hints must wait for the animation boundary");
         switch (SmokeStage)
         {
         case 0:
             if (Completion.Active()) throw std::runtime_error("Initial solved cube must not celebrate");
+            if (RandomCount!=DefaultScrambleMoves(static_cast<int>(n)))
+                throw std::runtime_error("Random move count must scale with cube order");
             RandomCount=8; Duration=0.055f;
             PointAtRandomButton();
             SendMessageW(Window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(MouseX,MouseY));
@@ -357,26 +438,65 @@ struct Application
             if (!(expected==Trail.State())) throw std::runtime_error("Random history and simulated state differ");
             if (Trail.ActiveMove() && !(*Trail.ActiveMove()==Trail.Entries()[Trail.Cursor()].Rotation))
                 throw std::runtime_error("Random animation and live history row differ");
+            if (VisibleText(std::to_string(Trail.HistoryCount())+" / 8"))
+                throw std::runtime_error("Random history must not show solution playback progress");
             if (!RandomFrameSaved && Trail.ActiveMove() && Trail.Progress()>0.25f)
             { CaptureSmoke(L".random-step.bmp"); RandomFrameSaved=true; }
-            if (!Locked()) { StartSolve(); SmokeStage=3; }
+            if (!Locked())
+            {
+                StartSolve();
+                const Cube before=Trail.State();
+                const auto camera=View;
+                const size_t entries=Trail.Entries().size();
+                PointAtSmokeSticker();
+                SendMessageW(Window,WM_LBUTTONDOWN,MK_LBUTTON,MAKELPARAM(SmokeClickX,SmokeClickY));
+                SendMessageW(Window,WM_MOUSEMOVE,MK_LBUTTON,MAKELPARAM(SmokeClickX+30,SmokeClickY+20));
+                SendMessageW(Window,WM_LBUTTONUP,0,MAKELPARAM(SmokeClickX+30,SmokeClickY+20));
+                POINT wheel{SmokeClickX,SmokeClickY}; ClientToScreen(Window,&wheel);
+                SendMessageW(Window,WM_MOUSEWHEEL,MAKEWPARAM(0,WHEEL_DELTA),MAKELPARAM(wheel.x,wheel.y));
+                if (!(Trail.State()==before) || Trail.Entries().size()!=entries ||
+                    View.Yaw!=camera.Yaw || View.Pitch!=camera.Pitch || View.Zoom!=camera.Zoom)
+                    throw std::runtime_error("Cube controls must stay locked while solving");
+                SmokeStage=3;
+            }
             break;
         }
         case 3:
-            if (Solving) break;
-            if (!HasSolution || DrawnHistoryRows!=8) throw std::runtime_error("Prepared solution leaked into history or solve failed");
+            if (Solving)
+            {
+                if (Scene.HoverMove) throw std::runtime_error("Hover controls must be hidden while solving");
+                break;
+            }
+            if (!HasSolution || DrawnHistoryRows!=SolutionEnd-SolutionStart ||
+                Trail.Entries()[SolutionStart].Source!=MoveSource::Solver)
+                throw std::runtime_error("Prepared solution is missing from the right panel");
+            if (SolutionAutoPlaying || VisibleText("0 / "+std::to_string(SolutionEnd-SolutionStart)))
+                throw std::runtime_error("Prepared solution must hide playback progress");
             CaptureSmoke(L".scrambled.bmp"); Demo(); SmokeStage=4; break;
         case 4:
+            if (SolutionAutoPlaying && !DemoRewind && Trail.Busy())
+            {
+                const size_t current=std::min(SolutionEnd-SolutionStart,Trail.HistoryCount()-SolutionStart);
+                if (!VisibleText(std::to_string(current)+" / "+std::to_string(SolutionEnd-SolutionStart)))
+                    throw std::runtime_error("Automatic solution playback must show current / total");
+                PlaybackHeaderSeen=PlaybackHeaderSeen || current>0;
+            }
             if (Locked()) break;
             if (!Trail.State().IsSolved()) throw std::runtime_error("Demo failed to solve");
             if (!Completion.Active() || Completion.TriggerCount()!=1) throw std::runtime_error("Solving must trigger one celebration");
             if (Completion.Age()<0.65f) break;
+            if (!PlaybackHeaderSeen || SolutionAutoPlaying ||
+                VisibleText(std::to_string(SolutionEnd-SolutionStart)+" / "+std::to_string(SolutionEnd-SolutionStart)))
+                throw std::runtime_error("Playback progress must disappear when the solution finishes");
             CaptureSmoke(L".celebration.bmp");
-            Trail.Seek(3); SmokeStage=5; break;
+            Trail.Seek(SolutionStart+3); SmokeStage=5; break;
         case 5:
             if (Locked()) break;
-            if (Trail.Cursor()!=3 || DrawnHistoryRows!=3) throw std::runtime_error("Seek did not rewind history");
-            Reset(); SmokeStage=6; break;
+            if (Trail.Cursor()!=SolutionStart+3 || DrawnHistoryRows!=SolutionEnd-SolutionStart) throw std::runtime_error("Seek did not rewind solution");
+            Reset();
+            if (Trail.Busy() || !Trail.State().IsSolved() || !Trail.Entries().empty() || Trail.HistoryCount()!=0)
+                throw std::runtime_error("Reset must clear the entire timeline immediately");
+            SmokeStage=6; break;
         case 6:
             if (Locked()) break;
             if (!Trail.State().IsSolved() || DrawnHistoryRows!=0 || !Trail.Entries().empty()) throw std::runtime_error("Reset failed");
@@ -515,7 +635,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
         app->MouseX = GET_X_LPARAM(lParam); app->MouseY = GET_Y_LPARAM(lParam);
         if (message == WM_LBUTTONDOWN) app->Buttons |= IMGUI_MBUT_LEFT; else app->Buttons |= IMGUI_MBUT_RIGHT;
         app->ButtonEvents.push_back({app->Buttons,app->MouseX,app->MouseY});
-        if (app->OverScene(app->MouseX) && !app->Pressed)
+        if (!app->Solving && app->OverScene(app->MouseX) && !app->Pressed)
         {
             app->Pressed = true; app->Dragged = false; app->Right = message == WM_RBUTTONDOWN;
             app->Ctrl = (wParam&MK_CONTROL)!=0;
@@ -525,7 +645,7 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_MOUSEMOVE:
     {
         app->MouseX = GET_X_LPARAM(lParam); app->MouseY = GET_Y_LPARAM(lParam);
-        if (app->Pressed)
+        if (app->Pressed && !app->Solving)
         {
             const int dx = app->MouseX-app->DownX, dy = app->MouseY-app->DownY;
             if (dx*dx+dy*dy > 25) app->Dragged = true;
@@ -555,7 +675,11 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     case WM_MOUSEWHEEL:
     {
         POINT point{GET_X_LPARAM(lParam),GET_Y_LPARAM(lParam)}; ScreenToClient(window,&point);
-        if (app->OverScene(point.x)) app->View.Zoom = std::clamp(app->View.Zoom*std::pow(1.12f,GET_WHEEL_DELTA_WPARAM(wParam)/120.0f),0.2f,4.0f);
+        if (app->OverScene(point.x))
+        {
+            if (!app->Solving)
+                app->View.Zoom = std::clamp(app->View.Zoom*std::pow(1.12f,GET_WHEEL_DELTA_WPARAM(wParam)/120.0f),0.2f,4.0f);
+        }
         else
         {
             app->Wheel -= GET_WHEEL_DELTA_WPARAM(wParam)/WHEEL_DELTA;
@@ -565,9 +689,22 @@ LRESULT CALLBACK WindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lPa
     }
     case WM_CAPTURECHANGED: case WM_KILLFOCUS: app->CancelGesture(); return 0;
     case WM_KEYDOWN:
-        if (wParam == VK_ESCAPE) { app->Cancel = true; app->DemoRewind = false; app->Trail.StopAtNextBoundary(); }
+        if (wParam == VK_ESCAPE)
+        {
+            if (app->Solving) app->Cancel = true;
+            else { app->DemoRewind = false; app->SolutionAutoPlaying = false; app->Trail.StopAtNextBoundary(); }
+        }
         if (wParam == VK_SPACE && !app->Solving && !(lParam & (1 << 30)))
-        { app->DemoRewind = false; if (app->Trail.Busy()) app->Trail.StopAtNextBoundary(); else app->Trail.Seek(app->Trail.Entries().size()); }
+        {
+            app->DemoRewind = false;
+            if (app->Trail.Busy()) { app->SolutionAutoPlaying = false; app->Trail.StopAtNextBoundary(); }
+            else
+            {
+                const size_t end=app->HasSolution ? app->SolutionEnd : app->Trail.Entries().size();
+                app->SolutionAutoPlaying=app->HasSolution && app->Trail.Cursor()<end;
+                app->Trail.Seek(end);
+            }
+        }
         return 0;
     case WM_DESTROY: PostQuitMessage(0); return 0;
     default: return DefWindowProcW(window,message,wParam,lParam);
@@ -618,7 +755,9 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int show)
             const auto now = std::chrono::steady_clock::now();
             float dt = std::chrono::duration<float>(now-previous).count(); previous = now;
             app.Tick(app.Smoke ? 0.016f : std::min(dt,0.1f));
-            app.Scene = BuildScene(app.Trail,app.View,app.Graphics.Width(),app.Graphics.Height(),LeftWidth,RightWidth,app.MouseX,app.MouseY,app.Smoke ? app.SmokeControl : (GetKeyState(VK_CONTROL)&0x8000)!=0);
+            app.Scene = BuildScene(app.Trail,app.View,app.Graphics.Width(),app.Graphics.Height(),LeftWidth,RightWidth,
+                app.Solving ? -1 : app.MouseX,app.Solving ? -1 : app.MouseY,
+                app.Smoke ? app.SmokeControl : (GetKeyState(VK_CONTROL)&0x8000)!=0);
             app.GUI();
             if (!app.Graphics.Draw(app.Scene)) throw std::runtime_error(app.Graphics.Error().empty() ? "Render failed" : app.Graphics.Error());
             if (app.Smoke) app.SmokeTick();

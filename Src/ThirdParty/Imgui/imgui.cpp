@@ -326,6 +326,7 @@ static const int CHECK_SIZE = 8;
 static const int DEFAULT_SPACING = 4;
 static const int TEXT_HEIGHT = 8;
 static const int SCROLL_AREA_PADDING = 6;
+static const int SCROLL_CONTENT_TOP_PADDING = 8;
 static const int INDENT_SIZE = 16;
 static const int AREA_HEADER = 28;
 
@@ -347,7 +348,7 @@ bool imguiBeginScrollArea(const char* name, int x, int y, int w, int h, int* scr
 	g_scrollId = (g_state.areaId<<24) | g_state.widgetId;
 
 	g_state.widgetX = x + SCROLL_AREA_PADDING;
-	g_state.widgetY = y+h-AREA_HEADER + (*scroll);
+	g_state.widgetY = y+h-AREA_HEADER-SCROLL_CONTENT_TOP_PADDING + (*scroll);
 	g_state.widgetW = w - SCROLL_AREA_PADDING*4;
 	g_scrollTop = y-AREA_HEADER+h;
 	g_scrollBottom = y+SCROLL_AREA_PADDING;

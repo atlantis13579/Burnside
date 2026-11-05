@@ -58,15 +58,23 @@ void Timeline::Seek(size_t cursor)
     if (cursor > m_Entries.size()) throw std::out_of_range("Timeline cursor");
     m_Target = cursor; m_ClearAtOrigin = false; m_Returning = false;
 }
+void Timeline::ResetImmediate()
+{
+    m_Cube.Reset();
+    m_Entries.clear();
+    m_Cursor=0; m_Target=0; m_Active.reset(); m_Progress=0;
+    m_Direction=1; m_ClearAtOrigin=false; m_Returning=false;
+}
 void Timeline::ResetAnimated() { m_Target = 0; m_ClearAtOrigin = true; }
 void Timeline::StopAtNextBoundary()
 {
     m_Target = m_Active && !m_Returning ? static_cast<size_t>(static_cast<ptrdiff_t>(m_Cursor) + m_Direction) : m_Cursor;
     m_ClearAtOrigin = false;
 }
-void Timeline::Tick(float seconds, float secondsPerQuarterTurn)
+void Timeline::Tick(float seconds, float secondsPerQuarterTurn, float scrambleSpeed)
 {
-    if (!std::isfinite(seconds) || seconds < 0 || !std::isfinite(secondsPerQuarterTurn) || secondsPerQuarterTurn <= 0)
+    if (!std::isfinite(seconds) || seconds < 0 || !std::isfinite(secondsPerQuarterTurn) || secondsPerQuarterTurn <= 0 ||
+        !std::isfinite(scrambleSpeed) || scrambleSpeed <= 0)
         throw std::invalid_argument("Invalid animation time");
     while (seconds > 0 && Busy())
     {
@@ -77,7 +85,9 @@ void Timeline::Tick(float seconds, float secondsPerQuarterTurn)
             m_Progress = 0;
             m_Returning = false;
         }
-        const float duration = secondsPerQuarterTurn * static_cast<float>(std::abs(m_Active->Turns));
+        const size_t index=m_Direction>0 ? m_Cursor : m_Cursor-1;
+        const float speed=m_Entries[index].Source==MoveSource::Scramble ? scrambleSpeed : 1.0f;
+        const float duration = secondsPerQuarterTurn * static_cast<float>(std::abs(m_Active->Turns))/speed;
         const float remaining = m_Returning ? m_Progress : 1.0f-m_Progress;
         const float consumed = std::min(seconds, remaining * duration);
         seconds -= consumed; m_Progress += (m_Returning ? -1.0f : 1.0f)*consumed/duration;

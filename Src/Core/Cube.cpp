@@ -29,7 +29,7 @@ std::string Move::ToString(int order) const
 
 Layout::Layout(int order) : m_Order(order), m_FaceSize(static_cast<size_t>(order)*order)
 {
-    if (order < 2 || order > MaxOrder) throw std::invalid_argument("Cube order must be 2..10");
+    if (order < 2 || order > MaxOrder) throw std::invalid_argument("Cube order must be 2..16");
     m_Stickers.reserve(FaceCount*m_FaceSize);
     for (int axis = 0; axis < AxisCount; ++axis)
         for (int sign : {-1, 1})

@@ -5,14 +5,17 @@
 
 namespace Burnside
 {
-enum class SolveStatus { Solved, AlreadySolved, DepthLimit, BudgetExceeded, Cancelled };
+enum class SolveStatus { Solved, AlreadySolved, DepthLimit, BudgetExceeded, Cancelled, InvalidCertificate, UnsupportedState };
+enum class SolveMethod { History, BreadthFirst, TwoPhase, Reduction, Yau, Hoya };
 struct SolveOptions
 {
     int MaxDepth = 8;
     size_t MaxStates = 150000;
+    size_t MaxTwoPhaseNodes = 50000000;
     size_t MaxMemoryBytes = 128 * 1024 * 1024;
     std::chrono::milliseconds TimeLimit{3000};
     const std::atomic_bool* Cancel = nullptr;
+    std::atomic<int>* ProgressStage = nullptr;
 };
 struct SolveResult
 {
@@ -27,7 +30,12 @@ struct SolveResult
 
 // A certificate is an optional path from the canonical solved state to the input.
 // It is checked against every input sticker before its inverse is accepted.
-// Without it, bounded bidirectional BFS operates only on the supplied color state.
+// The legacy overload uses bounded bidirectional BFS when no valid certificate is available.
+// The method overload selects one solver explicitly. Two-phase supports orders 2 and 3;
+// Center/edge reduction supports orders 4 through 16; staged Yau/Hoya variants
+// support even orders 4 through 16.
 SolveResult Solve(const Cube& state, const SolveOptions& options = {},
+                  const std::vector<Move>* certificate = nullptr);
+SolveResult Solve(const Cube& state, SolveMethod method, const SolveOptions& options = {},
                   const std::vector<Move>* certificate = nullptr);
 }

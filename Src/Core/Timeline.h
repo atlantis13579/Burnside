@@ -23,7 +23,8 @@ public:
     void Append(const std::vector<Move>& moves, MoveSource source, bool play = true);
     ManualAction ApplyManual(const Move& move);
     void Seek(size_t cursor);
-    void Tick(float seconds, float secondsPerQuarterTurn);
+    void Tick(float seconds, float secondsPerQuarterTurn, float scrambleSpeed = 1.0f);
+    void ResetImmediate();
     void ResetAnimated();
     void StopAtNextBoundary();
     std::vector<Move> Certificate() const;

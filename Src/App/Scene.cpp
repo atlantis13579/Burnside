@@ -101,19 +101,49 @@ SceneFrame BuildScene(const Timeline& timeline, const ViewSettings& view,
     const auto& stickers=cube.Geometry().Stickers();
     const int order=cube.Order();
     const float pitch=CubeWidth/order, center=(order-1)*0.5f;
+    const float cy=std::cos(view.Yaw),sy=std::sin(view.Yaw);
+    const float cp=std::cos(view.Pitch),sp=std::sin(view.Pitch);
+    const auto camera=[&](Vec3 p)
+    {
+        const Vec3 r{cy*p.X+sy*p.Z,p.Y,-sy*p.X+cy*p.Z};
+        return Vec3{r.X,cp*r.Y-sp*r.Z,sp*r.Y+cp*r.Z};
+    };
+    const float usableWidth=static_cast<float>(std::max(1,width-left-right));
+    const float focal=0.5f*std::min(usableWidth,height*0.82f)/std::tan(view.VerticalFov*Pi/360.0f)*view.Zoom;
+    const float centerX=left+usableWidth*0.5f,centerY=height*0.47f;
+    constexpr float nearPlane=0.1f,farPlane=50.0f;
+    const auto projectPoint=[&](Vec3 p)
+    {
+        const Vec3 transformed=camera(p);
+        const float depth=std::max(0.1f,CameraDistance-transformed.Z);
+        return ProjectedPoint{{(centerX+focal*transformed.X/depth)/width*2-1,
+            1-(centerY-focal*transformed.Y/depth)/height*2,
+            farPlane/(farPlane-nearPlane)-farPlane*nearPlane/((farPlane-nearPlane)*depth)},depth};
+    };
     const auto& active=timeline.ActiveMove();
     const float t=timeline.Progress(), angle=active ? t*t*(3-2*t)*active->Turns*Pi*0.5f : 0;
+    const float turnCos=std::cos(angle),turnSin=std::sin(angle);
     const auto centerOf=[&](const Coordinates& p) { return Vec3{(p[0]-center)*pitch,(p[1]-center)*pitch,(p[2]-center)*pitch}; };
     const auto moving=[&](const Coordinates& p) { return active && p[active->Axis]==active->Layer; };
-    const auto point=[&](Vec3 p,bool animate) { return animate ? Rotate(p,*active,angle) : p; };
+    const auto point=[&](Vec3 p,bool animate)
+    {
+        if (animate)
+        {
+            const float a=p[active->A],b=p[active->B];
+            p[active->A]=turnCos*a-turnSin*b; p[active->B]=turnSin*a+turnCos*b;
+        }
+        return p;
+    };
     const auto vertex=[&](Vec3 p,Vec3 n,uint32_t color,float u,float v,float material,bool animate)
     {
-        const auto projected=ProjectPoint(point(p,animate),view,width,height,left,right);
-        return Vertex{projected.Position,color,Camera(point(n,animate),view),u,v,material,0,projected.ClipW};
+        const auto projected=projectPoint(point(p,animate));
+        return Vertex{projected.Position,color,camera(point(n,animate)),u,v,material,0,projected.ClipW};
     };
     constexpr int indices[]={0,1,2,0,2,3};
     const auto emit=[&](const Vertex* corners) { for (int k : indices) frame.Vertices.push_back(corners[k]); };
-    frame.Vertices.reserve(static_cast<size_t>(order)*order*order*324+stickers.size()*6+12);
+    const size_t surfaceCubies=static_cast<size_t>(order)*order*order-
+        static_cast<size_t>(std::max(0,order-2))*std::max(0,order-2)*std::max(0,order-2);
+    frame.Vertices.reserve(surfaceCubies*170+stickers.size()*6+12);
     frame.StickerCenters.resize(stickers.size());
     const auto screenQuad=[&](float x,float y,float w,float h,float z,float material)
     {
@@ -126,7 +156,7 @@ SceneFrame BuildScene(const Timeline& timeline, const ViewSettings& view,
         emit(corners);
     };
     screenQuad(width*0.5f,height*0.5f,width*0.5f,height*0.5f,0.9998f,4);
-    const auto floor=ProjectPoint({0,-2.12f,0},view,width,height,left,right);
+    const auto floor=projectPoint({0,-2.12f,0});
     screenQuad((floor.Position.X+1)*width*0.5f,(1-floor.Position.Y)*height*0.5f,
                std::min(width-left-right,height)*0.28f*view.Zoom,height*0.065f*view.Zoom,0.999f,3);
     const Vec3 mouse{mouseX*2.0f/width-1,1-mouseY*2.0f/height,0};
@@ -135,13 +165,24 @@ SceneFrame BuildScene(const Timeline& timeline, const ViewSettings& view,
     struct DrawRange { size_t First,Count; Coordinates Position; int StickerIndex; };
     std::vector<DrawRange> ranges;
     ranges.reserve(static_cast<size_t>(order)*order*order+stickers.size());
+    const auto& mesh=CubieMesh();
+    std::vector<bool> staticFacing(mesh.size()),movingFacing(mesh.size());
+    for (size_t i=0; i<mesh.size(); ++i)
+        for (const Vec3& normal:mesh[i].Normals)
+        {
+            staticFacing[i]=staticFacing[i] || camera(normal).Z>-0.02f;
+            if (active) movingFacing[i]=movingFacing[i] || camera(point(normal,true)).Z>-0.02f;
+        }
     for (int x=0; x<order; ++x) for (int y=0; y<order; ++y) for (int z=0; z<order; ++z)
     {
+        if (x>0 && x<order-1 && y>0 && y<order-1 && z>0 && z<order-1) continue;
         const Coordinates coordinates{static_cast<int8_t>(x),static_cast<int8_t>(y),static_cast<int8_t>(z)};
         const Vec3 origin=centerOf(coordinates); const bool animate=moving(coordinates);
         const size_t first=frame.Vertices.size();
-        for (const Patch& patch : CubieMesh())
+        for (size_t patchIndex=0; patchIndex<mesh.size(); ++patchIndex)
         {
+            if (!(animate ? movingFacing[patchIndex] : staticFacing[patchIndex])) continue;
+            const Patch& patch=mesh[patchIndex];
             Vertex corners[4];
             for (int k=0; k<4; ++k) corners[k]=vertex(origin+patch.Points[k]*pitch,patch.Normals[k],0xff302722,0,0,0,animate);
             emit(corners);
@@ -168,7 +209,7 @@ SceneFrame BuildScene(const Timeline& timeline, const ViewSettings& view,
         }
         const size_t first=frame.Vertices.size(); emit(corners);
         ranges.push_back({first,6,s.Position,static_cast<int>(i)});
-        frame.StickerCenters[i]=ProjectPoint(point(origin,animate),view,width,height,left,right).Position;
+        frame.StickerCenters[i]=projectPoint(point(origin,animate)).Position;
         ++frame.VisibleStickers;
         float depth=0,uv[2]{};
         bool hit=canPick && (HitTriangle(mouse,corners[0],corners[1],corners[2],depth,uv) || HitTriangle(mouse,corners[0],corners[2],corners[3],depth,uv));
@@ -186,7 +227,7 @@ SceneFrame BuildScene(const Timeline& timeline, const ViewSettings& view,
         const Sticker& selected=stickers[frame.HoveredSticker];
         Vec3 origin=centerOf(selected.Position);
         origin[selected.Axis]+=selected.Sign*pitch*0.482f;
-        const auto project=[&](Vec3 p) { return ProjectPoint(p,view,width,height,left,right).Position; };
+        const auto project=[&](Vec3 p) { return projectPoint(p).Position; };
         for (const Move& move : {*frame.HoverMove,frame.HoverMove->Inverse()})
         {
             TurnHint hint; hint.Rotation=move;

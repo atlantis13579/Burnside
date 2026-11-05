@@ -9,7 +9,8 @@ int main(int argc, char** argv)
     try
     {
         int order = 3, count = 25; uint32_t seed = TimeSeed();
-        bool stateOnly = false;
+        bool stateOnly = false, explicitMethod = false;
+        SolveMethod selectedMethod = SolveMethod::History;
         std::string input, output, solution, movesFile;
         SolveOptions options; options.TimeLimit = std::chrono::seconds(30);
         for (int i = 1; i < argc; ++i)
@@ -25,19 +26,34 @@ int main(int argc, char** argv)
             else if (arg == "--seed") seed = static_cast<uint32_t>(std::stoul(value()));
             else if (arg == "--depth") options.MaxDepth = std::stoi(value());
             else if (arg == "--timeout-ms") options.TimeLimit = std::chrono::milliseconds(std::stoll(value()));
-            else if (arg == "--max-states") options.MaxStates = std::stoull(value());
+            else if (arg == "--max-states") options.MaxStates = options.MaxTwoPhaseNodes = std::stoull(value());
             else if (arg == "--state-only") stateOnly = true;
+            else if (arg == "--method")
+            {
+                const auto name=value(); explicitMethod=true;
+                if (name=="history") selectedMethod=SolveMethod::History;
+                else if (name=="bfs") selectedMethod=SolveMethod::BreadthFirst;
+                else if (name=="two-phase") selectedMethod=SolveMethod::TwoPhase;
+                else if (name=="reduction") selectedMethod=SolveMethod::Reduction;
+                else if (name=="yau") selectedMethod=SolveMethod::Yau;
+                else if (name=="hoya") selectedMethod=SolveMethod::Hoya;
+                else throw std::invalid_argument("Unknown solve method: " + name);
+            }
             else if (arg == "--load") input = value();
             else if (arg == "--save") output = value();
             else if (arg == "--solution") solution = value();
             else if (arg == "--moves") movesFile = value();
             else if (arg == "--help")
             {
-                std::cout << "BurnsideCLI [--order 2..10] [--scramble N] [--seed N]\n"
-                    "  [--state-only] [--depth N] [--timeout-ms N] [--max-states N]\n"
+                std::cout << "BurnsideCLI [--order 2..16] [--scramble N] [--seed N]\n"
+                    "  [--method history|bfs|two-phase|reduction|yau|hoya] [--state-only] [--depth N]\n"
+                    "  [--timeout-ms N] [--max-states N]\n"
                     "  [--load state.txt] [--save state.txt] [--solution moves.txt]\n"
                     "  [--moves construction.moves] (replaces the random scramble)\n"
-                    "Without --state-only, a validated construction certificate is used.\n"
+                    "--state-only is an alias for --method bfs.\n"
+                    "Two-phase solves 2x2 and 3x3 from sticker state without history.\n"
+                    "Reduction solves 4x4 through 16x16 from sticker state.\n"
+                    "Yau/Hoya-style staging supports even orders 4x4 through 16x16.\n"
                     "Order N means a physical NxNxN cube with six NxN faces.\n"
                     "State-only BFS is bounded, not a general efficient arbitrary-state solver.\n"
                     "Exit: 0 verified solution, 2 search limit, 1 input/runtime error.\n";
@@ -56,8 +72,11 @@ int main(int argc, char** argv)
         }
         else if (input.empty()) { path = Scramble(order, count, seed); cube.Apply(path); }
         if (!output.empty()) SaveState(cube, output);
-        const bool useCertificate = !stateOnly && (input.empty() || !movesFile.empty());
-        const auto result = Solve(cube, options, useCertificate ? &path : nullptr);
+        const bool haveCertificate = input.empty() || !movesFile.empty();
+        const SolveMethod method=stateOnly ? SolveMethod::BreadthFirst :
+            explicitMethod ? selectedMethod : haveCertificate ? SolveMethod::History : SolveMethod::BreadthFirst;
+        const auto result = Solve(cube, method, options,
+            method==SolveMethod::History && haveCertificate ? &path : nullptr);
         std::cout << cube.Order() << 'x' << cube.Order() << 'x' << cube.Order() << ", " << cube.Colors().size() << " stickers\n"
             << result.Method << '\n' << result.Message << '\n'
             << "Visited: " << result.Visited << ", time: " << result.Milliseconds << " ms\n";

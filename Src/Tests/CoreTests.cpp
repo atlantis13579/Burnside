@@ -20,9 +20,9 @@ template<class F> void Throws(F action)
 }
 void Algebra()
 {
-    Throws([] { Cube invalid(1); }); Throws([] { Cube invalid(11); });
+    Throws([] { Cube invalid(1); }); Throws([] { Cube invalid(17); });
     Check(TimeSeed()!=TimeSeed(),"Consecutive time seeds must differ");
-    for (int n=2; n<=10; ++n)
+    for (int n=2; n<=MaxOrder; ++n)
     {
         Cube cube(n),solved=cube;
         const auto& layout=cube.Geometry();
@@ -81,7 +81,7 @@ void Algebra()
 }
 void Search()
 {
-    for (int n=2; n<=10; ++n)
+    for (int n=2; n<=MaxOrder; ++n)
     {
         Cube cube(n); cube.Apply(Scramble(n,n<=4 ? 3 : 2,97));
         SolveOptions options; options.MaxDepth=6; options.TimeLimit=std::chrono::seconds(10);
@@ -107,9 +107,111 @@ void Search()
     std::ofstream legacy("../Intermediate/Legacy.moves"); legacy << "BURNSIDE_MOVES 1 4\n"; legacy.close();
     Throws([] { LoadMoves("../Intermediate/Legacy.moves"); });
 }
+void TwoPhase()
+{
+    SolveOptions options; options.TimeLimit=std::chrono::seconds(15);
+    for (int order : {2,3})
+        for (uint32_t seed : {1u,42u,2026u})
+        {
+            Cube cube(order); cube.Apply(Scramble(order,25,seed));
+            Cube independent(order); independent.SetColors(cube.Colors());
+            const auto answer=Solve(independent,SolveMethod::TwoPhase,options);
+            Check(answer.Success() && !answer.Moves.empty(),"Two-phase solves without a move history");
+            independent.Apply(answer.Moves);
+            Check(independent.IsSolved(),"Two-phase solution replays on the sticker model");
+        }
+    Cube middle(3); middle.Apply({0,1,1,2,1});
+    const auto oriented=Solve(middle,SolveMethod::TwoPhase,options);
+    Check(oriented.Success(),"Two-phase normalizes a middle-slice center rotation");
+    middle.Apply(oriented.Moves); Check(middle.IsSolved(),"Middle-slice solution replays");
+    Cube large(4); large.Apply({0,0,1,2,1});
+    Check(Solve(large,SolveMethod::TwoPhase,options).Status==SolveStatus::UnsupportedState,
+          "Two-phase reports unsupported cube orders");
+    Cube impossible(3); auto colors=impossible.Colors();
+    std::swap(colors[0],colors[9]); impossible.SetColors(colors);
+    Check(Solve(impossible,SolveMethod::TwoPhase,options).Status==SolveStatus::UnsupportedState,
+          "Two-phase rejects an impossible sticker arrangement");
+    Cube noHistory(3); noHistory.Apply({0,0,1,2,1});
+    Check(Solve(noHistory,SolveMethod::History,options).Status==SolveStatus::InvalidCertificate,
+          "Explicit history method requires a certificate");
+    options.MaxTwoPhaseNodes=1;
+    Check(Solve(noHistory,SolveMethod::TwoPhase,options).Status==SolveStatus::BudgetExceeded,
+          "Two-phase honors its search budget");
+}
+void Reduction()
+{
+    SolveOptions options; options.TimeLimit=std::chrono::seconds(15);
+    std::atomic<int> stage{0}; options.ProgressStage=&stage;
+    for (int order=4; order<=MaxOrder; ++order)
+    {
+        stage=0;
+        Cube scrambled(order); scrambled.Apply(Scramble(order,25,static_cast<uint32_t>(order+42)));
+        Cube independent(order); independent.SetColors(scrambled.Colors());
+        const auto answer=Solve(independent,SolveMethod::Reduction,options);
+        Check(answer.Success() && !answer.Moves.empty(),"NxN reduction solves without move history");
+        Check(stage==6,"NxN reduction reports verification stage");
+        independent.Apply(answer.Moves);
+        Check(independent.IsSolved(),"NxN reduction replays on the sticker model");
+    }
+    Cube small(3); small.Apply({0,0,1,2,1});
+    Check(Solve(small,SolveMethod::Reduction,options).Status==SolveStatus::UnsupportedState,
+          "Reduction reports unsupported orders");
+}
+void StagedReduction()
+{
+    SolveOptions options; options.TimeLimit=std::chrono::seconds(15);
+    std::atomic<int> stage{0}; options.ProgressStage=&stage;
+    for (int order : {4,6,8,10,12,14,16})
+    {
+        Cube scrambled(order); scrambled.Apply(Scramble(order,25,static_cast<uint32_t>(order+97)));
+        for (SolveMethod method : {SolveMethod::Yau,SolveMethod::Hoya})
+        {
+            stage=0;
+            Cube independent(order); independent.SetColors(scrambled.Colors());
+            const auto answer=Solve(independent,method,options);
+            Check(answer.Success() && !answer.Moves.empty(),"Staged reduction solves without move history");
+            Check(stage==7,"Staged reduction reports verification stage");
+            independent.Apply(answer.Moves);
+            Check(independent.IsSolved(),"Staged reduction replays on the sticker model");
+        }
+    }
+    Cube odd(5); odd.Apply({0,1,1,2,1});
+    Check(Solve(odd,SolveMethod::Yau,options).Status==SolveStatus::UnsupportedState,
+          "Yau-style staging reports unsupported odd orders");
+    Check(Solve(odd,SolveMethod::Hoya,options).Status==SolveStatus::UnsupportedState,
+          "Hoya-style staging reports unsupported odd orders");
+    Cube limited(4); limited.Apply(Scramble(4,25,46));
+    const Cube before=limited;
+    options.MaxTwoPhaseNodes=0;
+    for (SolveMethod method : {SolveMethod::Reduction,SolveMethod::Yau,SolveMethod::Hoya})
+    {
+        stage=0;
+        const auto answer=Solve(limited,method,options);
+        Check(stage==(method==SolveMethod::Reduction ? 3 : 6),
+              "Reduction methods reach the shared two-phase finish");
+        Check(answer.Status==SolveStatus::BudgetExceeded && answer.Visited==1,
+              "Reduction methods propagate the two-phase node budget");
+        Check(answer.Moves.empty() && limited==before,
+              "An exhausted reduction does not publish a partial solution or mutate its input");
+    }
+}
 void History()
 {
-    for (int n=2; n<=10; ++n)
+    const Move timingMove{1,0,0,2,1};
+    Timeline randomTiming(3),manualTiming(3);
+    randomTiming.Append({timingMove},MoveSource::Scramble);
+    manualTiming.Append({timingMove},MoveSource::Manual);
+    randomTiming.Tick(0.05f,0.3f,3.0f);
+    manualTiming.Tick(0.05f,0.3f,3.0f);
+    Check(std::abs(randomTiming.Progress()-0.5f)<1e-5f &&
+          std::abs(manualTiming.Progress()-1.0f/6.0f)<1e-5f,
+          "Random animation uses three times the global turn speed");
+    randomTiming.ResetImmediate();
+    Check(randomTiming.State().IsSolved() && randomTiming.Entries().empty() &&
+          randomTiming.Cursor()==0 && randomTiming.Target()==0 &&
+          randomTiming.HistoryCount()==0 && !randomTiming.Busy() && !randomTiming.ActiveMove(),
+          "Immediate reset clears an active turn and all future history");
+    for (int n=2; n<=MaxOrder; ++n)
     {
         Timeline timeline(n); const auto path=Scramble(n,6,93);
         timeline.Append(path,MoveSource::Scramble);
@@ -175,11 +277,12 @@ void Geometry()
         const auto near=ProjectPoint({1,0,1},front,size.first,size.second,290,340);
         Check(near.Position.X>x.Position.X && near.ClipW<x.ClipW,"Camera uses perspective depth, not a flattened projection");
     }
-    for (int n=2; n<=10; ++n)
+    for (int n=2; n<=MaxOrder; ++n)
     {
         Timeline timeline(n); ViewSettings view;
         auto scene=BuildScene(timeline,view,1560,960,290,340,-1,-1);
-        Check(scene.RenderedCubies==static_cast<size_t>(n*n*n),"Render contains NxNxN cubies");
+        Check(scene.RenderedCubies==static_cast<size_t>(n*n*n-(n-2)*(n-2)*(n-2)),"Render omits hidden interior cubies");
+        Check(scene.Vertices.size()<static_cast<size_t>(n*n*n*324),"Surface rendering stays below full cubie geometry");
         Check(scene.VisibleStickers==static_cast<size_t>(6*n*n),"Render contains all six NxN faces");
         for (const Vertex& v : scene.Vertices)
             Check(std::isfinite(v.Position.X) && std::isfinite(v.Position.Y) && std::isfinite(v.Position.Z) && v.ClipW>0,"Finite perspective geometry");
@@ -237,7 +340,7 @@ void Feedback()
     effect.Tick(true,true,0.1f);
     Check(!effect.Active(),"A new move dismisses the celebration");
 
-    for (int n : {2,3,10})
+    for (int n : {2,3,10,16})
     {
         Timeline timeline(n); timeline.Append(Scramble(n,5,72),MoveSource::Scramble); timeline.Tick(10,0.2f);
         for (const auto angles : std::vector<std::pair<float,float>>{{-0.58f,0.4f},{2.2f,-0.45f},{-2.6f,1.0f},{0.4f,-1.1f}})
@@ -280,6 +383,6 @@ void Feedback()
 }
 int main()
 {
-    try { Algebra(); Search(); History(); Geometry(); Feedback(); std::cout << "PASS: " << checks << " checks\n"; return 0; }
+    try { Algebra(); Search(); TwoPhase(); Reduction(); StagedReduction(); History(); Geometry(); Feedback(); std::cout << "PASS: " << checks << " checks\n"; return 0; }
     catch (const std::exception& e) { std::cerr << "FAIL after " << checks << " checks: " << e.what() << '\n'; return 1; }
 }

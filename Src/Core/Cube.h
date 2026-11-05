@@ -8,7 +8,7 @@
 
 namespace Burnside
 {
-constexpr int MaxOrder = 10;
+constexpr int MaxOrder = 16;
 constexpr int AxisCount = 3;
 constexpr int FaceCount = 6;
 using Coordinates = std::array<int8_t, AxisCount>;
