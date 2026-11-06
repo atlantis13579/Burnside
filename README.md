@@ -1,9 +1,10 @@
 ﻿# Burnside — NxNxN Rubik Cube Solver
 
-Native C++17, Windows x64, Direct3D 11. Supports **2×2×2 through 16×16×16**
-physical cubic puzzles, animated row/column controls, reversible history and an
-independent solver library. Here N is the cube order: each of its six faces
-contains N×N stickers.
+Supports **2×2×2 through 16×16×16** physical cubic puzzles, animated row/column 
+controls, reversible history and an independent solver library. Here N is the 
+cube order: each of its six faces contains N×N stickers.
+
+<img width="1445" height="874" alt="cube" src="https://github.com/user-attachments/assets/7ab54aa8-586b-49ed-96e7-462b509b7e8e" />
 
 ## Cube model
 
